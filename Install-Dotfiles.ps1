@@ -2,28 +2,49 @@
 <#
 .SYNOPSIS
     Christian Lempa dotfiles-win full installer
-    GitHub: https://github.com/ChristianLempa/dotfiles-win
+    dotfiles-win : https://github.com/ChristianLempa/dotfiles-win
+    hackbox      : https://github.com/ChristianLempa/hackbox
 
 .DESCRIPTION
     Installs and configures:
-      - Scoop package manager
-      - Required packages (starship, kubectl, helm, datree, git, etc.)
-      - Hack Nerd Font (Mono + Regular) for terminal icons
-      - Windows Terminal tab icons (git cloned from smothermonethan/icon)
-      - Windows Terminal settings (xcad color scheme, Hack Nerd Font, profiles)
-      - Starship prompt config (~/.starship/starship.toml)
-      - PowerShell profile (Microsoft.PowerShell_profile.ps1)
+      1. Scoop package manager
+      2. Hack Nerd Font (Regular + Mono)
+      3. CLI tools  (starship, git, kubectl, helm, datree)
+      4. Windows Terminal tab icons  (git clone smothermonethan/icon)
+      5. WSL distros: Ubuntu 20.04, Kali Linux, Arch Linux
+      6. Windows Terminal settings.json
+           - defaultProfile: Ubuntu Linux
+           - xcad_tdl colour scheme (+ hackthebox, tdl_colorful, vscode, etc.)
+           - Hack Nerd Font 14pt, opacity 95
+           - 5 profiles with per-tab colours and icons8-* icons
+           - exact startingDirectory paths with your WSL username
+      7. Starship prompt config  (~/.starship/starship.toml)
+      8. PowerShell profile  (Microsoft.PowerShell_profile.ps1)
+           - aliases k/h/g, goto, kn, Terminal-Icons, PSReadLine, datree completion
+
+.PARAMETER WslUsername
+    Your WSL Linux username — baked into the startingDirectory paths in
+    settings.json.  Defaults to 'xcad' (Christian Lempa's username).
+    Change it to your own:   .\Install-Dotfiles.ps1 -WslUsername "yourname"
 
 .NOTES
     Run from an elevated PowerShell 7 session:
         Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-        .\Install-Dotfiles.ps1
+        .\Install-Dotfiles.ps1 -WslUsername "yourname"
+
+    Skip individual sections with switches, e.g.:
+        .\Install-Dotfiles.ps1 -SkipWsl -SkipFonts
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
+    # Your WSL Linux username — written into startingDirectory paths.
+    # Defaults to 'xcad' (Christian Lempa's username).
+    [string]$WslUsername = "xcad",
+
     [switch]$SkipFonts,
     [switch]$SkipPackages,
+    [switch]$SkipWsl,               # skip WSL distro installation
     [switch]$SkipTerminalSettings,
     [switch]$SkipProfile,
     [switch]$SkipStarship
@@ -157,6 +178,114 @@ if (Test-Path (Join-Path $iconsDir ".git")) {
     Write-OK "Icons repo cloned: $iconsDir"
 }
 
+# ── 4b. WSL distros ──────────────────────────────────────────────────────────
+#
+#  Christian Lempa's three WSL distros (from dotfiles-win settings.json):
+#    • Ubuntu 20.04  — default profile, general dev environment
+#    • Kali Linux    — security/hacking toolbox (hackbox distro)
+#    • Arch Linux    — minimalist rolling-release distro
+#
+#  Installed via `wsl --install` (Windows 10 2004+ / Windows 11).
+
+if (-not $SkipWsl) {
+    Write-Step "Installing WSL distros  (Ubuntu-20.04 · Kali Linux · Arch Linux)"
+
+    # Ensure wsl.exe is present; enable the WSL Windows feature if not
+    $wslExe = "$env:SystemRoot\System32\wsl.exe"
+    if (-not (Test-Path $wslExe)) {
+        Write-Warn "wsl.exe not found — enabling WSL and VirtualMachinePlatform features..."
+        dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+        dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+        Write-Warn "A reboot is required. Re-run with -SkipFonts -SkipPackages after rebooting."
+        exit 0
+    }
+
+    # Force WSL 2 as the default
+    wsl --set-default-version 2 2>$null
+    Write-OK "WSL default version: 2"
+
+    function Test-WslDistro {
+        param([string]$Name)
+        # --list --quiet outputs bare names, one per line
+        $list = wsl --list --quiet 2>$null | ForEach-Object { $_.Trim() -replace '\x00','' }
+        return ($list -contains $Name)
+    }
+
+    # ── Ubuntu 20.04 ─────────────────────────────────────────────────────────
+    if (-not (Test-WslDistro "Ubuntu-20.04")) {
+        Write-Host "    Installing Ubuntu 20.04  (may take several minutes)..." -ForegroundColor Yellow
+        wsl --install --distribution Ubuntu-20.04 --no-launch
+        Write-OK "Ubuntu 20.04 installed"
+        Write-Warn "On first launch: create a UNIX user matching -WslUsername '$WslUsername'"
+    } else {
+        Write-Skip "Ubuntu-20.04 already registered"
+    }
+
+    # ── Kali Linux ───────────────────────────────────────────────────────────
+    if (-not (Test-WslDistro "kali-linux")) {
+        Write-Host "    Installing Kali Linux  (may take several minutes)..." -ForegroundColor Yellow
+        wsl --install --distribution kali-linux --no-launch
+        Write-OK "Kali Linux installed"
+        Write-Warn "On first launch: create a UNIX user matching -WslUsername '$WslUsername'"
+        Write-Host "    TIP: After first Kali launch run:" -ForegroundColor DarkCyan
+        Write-Host "         sudo apt update && sudo apt install -y kali-linux-default" -ForegroundColor DarkCyan
+    } else {
+        Write-Skip "kali-linux already registered"
+    }
+
+    # ── Arch Linux ───────────────────────────────────────────────────────────
+    # Arch is not in the official wsl --list --online catalogue; install via
+    # the community yuk7/wsldl Arch tarball or the ArchWSL release.
+    if (-not (Test-WslDistro "Arch")) {
+        Write-Host "    Installing Arch Linux via ArchWSL..." -ForegroundColor Yellow
+        $archDir    = "$env:USERPROFILE\WSL\Arch"
+        $archExe    = "$archDir\Arch.exe"
+        $archRelUrl = "https://github.com/yuk7/ArchWSL/releases/latest/download/Arch.zip"
+        $archZip    = "$env:TEMP\ArchWSL.zip"
+
+        if (-not (Test-Path $archDir)) {
+            New-Item -ItemType Directory -Path $archDir -Force | Out-Null
+        }
+
+        try {
+            Invoke-WebRequest -Uri $archRelUrl -OutFile $archZip -UseBasicParsing -ErrorAction Stop
+            Expand-Archive -Path $archZip -DestinationPath $archDir -Force
+            Remove-Item $archZip -Force
+
+            # Register / install the distro
+            if (Test-Path $archExe) {
+                & $archExe
+                Write-OK "Arch Linux installed via ArchWSL — follow on-screen setup"
+                Write-Warn "Run inside Arch:  useradd -m -G wheel $WslUsername && passwd $WslUsername"
+                Write-Warn "Then set as default user:  $archExe config --default-user $WslUsername"
+            } else {
+                Write-Warn "Arch.exe not found after extraction. Check $archDir manually."
+            }
+        } catch {
+            Write-Warn "ArchWSL download failed ($_)."
+            Write-Warn "Install manually: https://github.com/yuk7/ArchWSL/releases"
+        }
+    } else {
+        Write-Skip "Arch already registered"
+    }
+} else {
+    Write-Skip "WSL distro installation skipped (-SkipWsl)"
+}
+
+# ── Resolve WSL username for settings.json paths ──────────────────────────────
+# Auto-detect from a running Ubuntu instance; fall back to -WslUsername value.
+$resolvedWslUser = $WslUsername
+try {
+    $detected = (wsl -d Ubuntu-20.04 -- whoami 2>$null).Trim() -replace '\x00',''
+    if ($detected -and $detected -ne 'root' -and $detected -ne '') {
+        $resolvedWslUser = $detected
+        if ($resolvedWslUser -ne $WslUsername) {
+            Write-Warn "Auto-detected WSL username '$resolvedWslUser'. Pass -WslUsername to override."
+        }
+    }
+} catch { <# distro not running yet — use supplied value #> }
+Write-OK "WSL username for startingDirectory paths: $resolvedWslUser"
+
 # ── 5. Windows Terminal settings.json ─────────────────────────────────────────
 
 if (-not $SkipTerminalSettings) {
@@ -199,7 +328,7 @@ if (-not $SkipTerminalSettings) {
                 "icon": "%userprofile%\\WindowsTerminalIcons\\icons8-ubuntu-32.png",
                 "name": "Ubuntu Linux",
                 "source": "Windows.Terminal.Wsl",
-                "startingDirectory": "\\\\wsl$\\Ubuntu-20.04\\home\\xcad",
+                "startingDirectory": "UBUNTU_DIR_PLACEHOLDER",
                 "tabColor": "#080e6d"
             },
             {
@@ -208,7 +337,7 @@ if (-not $SkipTerminalSettings) {
                 "icon": "%userprofile%\\WindowsTerminalIcons\\icons8-fsociety-mask-32.png",
                 "name": "Kali Linux",
                 "source": "Windows.Terminal.Wsl",
-                "startingDirectory": "\\\\wsl.localhost\\kali-linux\\home\\xcad",
+                "startingDirectory": "KALI_DIR_PLACEHOLDER",
                 "tabColor": "#14a8d7"
             },
             {
@@ -218,7 +347,7 @@ if (-not $SkipTerminalSettings) {
                 "icon": "%userprofile%\\WindowsTerminalIcons\\icons8-arch-linux-32.png",
                 "name": "Arch Linux",
                 "source": "Windows.Terminal.Wsl",
-                "startingDirectory": "\\\\wsl.localhost\\Arch\\home\\xcad",
+                "startingDirectory": "ARCH_DIR_PLACEHOLDER",
                 "tabColor": "#0d4f10"
             },
             {
@@ -578,6 +707,19 @@ if (-not $SkipTerminalSettings) {
 }
 '@
 
+    # Build exact startingDirectory UNC paths with the resolved WSL username.
+    # Verbatim from ChristianLempa/dotfiles-win settings.json:
+    #   Ubuntu  → \\wsl$\Ubuntu-20.04\home\<user>     (legacy wsl$ share)
+    #   Kali    → \\wsl.localhost\kali-linux\home\<user>
+    #   Arch    → \\wsl.localhost\Arch\home\<user>
+    $ubuntuDir = '\\\\wsl$\\Ubuntu-20.04\\home\\' + $resolvedWslUser
+    $kaliDir   = '\\\\wsl.localhost\\kali-linux\\home\\' + $resolvedWslUser
+    $archDir2  = '\\\\wsl.localhost\\Arch\\home\\' + $resolvedWslUser
+
+    $wtSettings = $wtSettings.Replace('UBUNTU_DIR_PLACEHOLDER', $ubuntuDir)
+    $wtSettings = $wtSettings.Replace('KALI_DIR_PLACEHOLDER',   $kaliDir)
+    $wtSettings = $wtSettings.Replace('ARCH_DIR_PLACEHOLDER',   $archDir2)
+
     foreach ($wtPath in $wtPaths) {
         $wtDir = Split-Path $wtPath
         if (Test-Path $wtDir) {
@@ -913,15 +1055,38 @@ Register-ArgumentCompleter -CommandName 'datree' -ScriptBlock {
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
-Write-Host "`n$(('=' * 62))" -ForegroundColor Cyan
-Write-Host " Christian Lempa dotfiles-win installation complete!" -ForegroundColor Green
-Write-Host "$(('=' * 62))`n" -ForegroundColor Cyan
+Write-Host "`n$(('=' * 66))" -ForegroundColor Cyan
+Write-Host "  Christian Lempa dotfiles-win installation complete!" -ForegroundColor Green
+Write-Host "$(('=' * 66))`n" -ForegroundColor Cyan
 Write-Host @"
-Next steps:
-  1. Restart Windows Terminal — new xcad_tdl theme + tab icons will load.
-  2. Confirm 'Hack Nerd Font' is set in Terminal > Settings > Defaults > Font.
-  3. Adjust WSL startingDirectory paths in settings.json if needed.
-  4. Icons cloned from github.com/smothermonethan/icon → $env:USERPROFILE\WindowsTerminalIcons\
-     Re-run the script any time to pull the latest icons (git pull).
-  5. Reload your profile in the current session:  . `$PROFILE
+  What was installed / configured
+  ──────────────────────────────────────────────────────────────
+  Fonts        Hack Nerd Font + Hack Nerd Font Mono
+  CLI tools    starship · git · kubectl · helm · datree
+  Icons        git clone github.com/smothermonethan/icon
+               → $env:USERPROFILE\WindowsTerminalIcons\
+  WSL distros  Ubuntu-20.04  → \\wsl`$\Ubuntu-20.04\home\$resolvedWslUser
+               kali-linux    → \\wsl.localhost\kali-linux\home\$resolvedWslUser
+               Arch          → \\wsl.localhost\Arch\home\$resolvedWslUser
+  Terminal     defaultProfile: Ubuntu Linux
+               colour scheme: xcad_tdl (+ hackthebox, colorful, vscode variants)
+               font: Hack Nerd Font 14pt · opacity 95 · 5 profiles w/ tab colours
+  Starship     xcad theme prompt
+  PS profile   aliases k/h/g · goto · kn · Terminal-Icons
+               PSReadLine history autocomplete · datree tab completion
+
+  Next steps
+  ──────────────────────────────────────────────────────────────
+  1. Restart Windows Terminal — xcad_tdl theme + icons8 tab icons take effect.
+  2. Verify font: Terminal > Settings > Defaults > Font = "Hack Nerd Font".
+  3. First WSL launch — create your UNIX user:
+       wsl -d Ubuntu-20.04      →  username should be: $resolvedWslUser
+       wsl -d kali-linux        →  username should be: $resolvedWslUser
+       %USERPROFILE%\WSL\Arch\Arch.exe  →  follow Arch setup, then:
+         useradd -m -G wheel $resolvedWslUser && passwd $resolvedWslUser
+  4. Kali hackbox tooling:   sudo apt update && sudo apt install -y kali-linux-default
+  5. If your Linux username differs, re-run:
+       .\Install-Dotfiles.ps1 -WslUsername "yourname" -SkipWsl -SkipFonts -SkipPackages
+  6. Pull latest icons any time:   git -C "$env:USERPROFILE\WindowsTerminalIcons" pull
+  7. Reload profile:   . `$PROFILE
 "@ -ForegroundColor White
